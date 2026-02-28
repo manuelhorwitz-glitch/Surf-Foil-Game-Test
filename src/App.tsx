@@ -4,9 +4,23 @@
  */
 
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Sky, Grid, Trail } from '@react-three/drei';
-import { useRef, useState, useEffect } from 'react';
+import { Sky, Trail } from '@react-three/drei';
+import { useRef, useState, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
+
+// --- Wave Configuration ---
+const WAVE_AMPLITUDE = 1.2;       // ~3-4ft wave face
+const WAVE_WIDTH = 10;            // meters wide (perpendicular to crest)
+const WAVE_ANGLE = Math.PI / 6;   // 30° diagonal (right-hand wave)
+const WAVE_DIR_X = Math.cos(WAVE_ANGLE);
+const WAVE_DIR_Z = Math.sin(WAVE_ANGLE);
+
+function getWaveHeight(x: number, z: number): number {
+  const d = x * WAVE_DIR_X + z * WAVE_DIR_Z;
+  const dNorm = d / (WAVE_WIDTH / 2);
+  if (Math.abs(dNorm) >= 1.0) return 0;
+  return WAVE_AMPLITUDE * Math.pow(Math.cos(dNorm * Math.PI / 2), 1.5);
+}
 
 interface PlayerProps {
   gameState: 'start' | 'playing' | 'gameover';
@@ -207,6 +221,34 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
   );
 }
 
+function WaveMesh() {
+  const meshRef = useRef<THREE.Mesh>(null);
+
+  const geometry = useMemo(() => {
+    const geo = new THREE.PlaneGeometry(1000, 1000, 200, 200);
+    geo.rotateX(-Math.PI / 2);
+    return geo;
+  }, []);
+
+  useFrame(() => {
+    if (!meshRef.current) return;
+    const posAttr = meshRef.current.geometry.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+      const x = posAttr.getX(i);
+      const z = posAttr.getZ(i);
+      posAttr.setY(i, getWaveHeight(x, z));
+    }
+    posAttr.needsUpdate = true;
+    meshRef.current.geometry.computeVertexNormals();
+  });
+
+  return (
+    <mesh ref={meshRef} geometry={geometry} receiveShadow>
+      <meshStandardMaterial color="#006994" side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
 export default function App() {
   const [gameState, setGameState] = useState<'start' | 'playing' | 'gameover'>('start');
   const [crashReason, setCrashReason] = useState('');
@@ -220,12 +262,7 @@ export default function App() {
         
         <Player gameState={gameState} setGameState={setGameState} setCrashReason={setCrashReason} />
 
-        <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-          <planeGeometry args={[1000, 1000]} />
-          <meshStandardMaterial color="#006994" />
-        </mesh>
-        
-        <Grid renderOrder={-1} position={[0, 0.01, 0]} infiniteGrid fadeDistance={50} cellColor="#ffffff" sectionColor="#ffffff" cellThickness={0.5} sectionThickness={1} fadeStrength={1} />
+        <WaveMesh />
       </Canvas>
       
       {/* HUD */}
