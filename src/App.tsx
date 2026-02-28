@@ -9,17 +9,38 @@ import { useRef, useState, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 
 // --- Wave Configuration ---
-const WAVE_AMPLITUDE = 1.2;       // ~3-4ft wave face
-const WAVE_WIDTH = 10;            // meters wide (perpendicular to crest)
+const WAVE_AMPLITUDE = 3.5;       // ~10-12ft wave face — big wave for testing slope physics
+const WAVE_WIDTH = 14;            // meters wide (perpendicular to crest)
 const WAVE_ANGLE = Math.PI / 6;   // 30° diagonal (right-hand wave)
 const WAVE_DIR_X = Math.cos(WAVE_ANGLE);
 const WAVE_DIR_Z = Math.sin(WAVE_ANGLE);
+const WAVE_SPEED = 3;              // m/s — wave propagation speed (conservative for a small wave)
+const GRAVITY = 9.8;
 
-function getWaveHeight(x: number, z: number): number {
-  const d = x * WAVE_DIR_X + z * WAVE_DIR_Z;
+// --- Starting Position (on the wave face, facing along the crest) ---
+const START_WAVE_D = 2;                          // meters from peak along wave direction
+const START_X = START_WAVE_D * WAVE_DIR_X;        // ~1.73
+const START_Z = START_WAVE_D * WAVE_DIR_Z;        // ~1.0
+const START_YAW = -WAVE_ANGLE;                    // face along the crest (rides roughly +X, -Z)
+
+function getWaveHeight(x: number, z: number, t: number = 0): number {
+  const d = x * WAVE_DIR_X + z * WAVE_DIR_Z - WAVE_SPEED * t;
   const dNorm = d / (WAVE_WIDTH / 2);
   if (Math.abs(dNorm) >= 1.0) return 0;
   return WAVE_AMPLITUDE * Math.pow(Math.cos(dNorm * Math.PI / 2), 1.5);
+}
+
+const SLOPE_EPSILON = 0.05;
+
+function getWaveSlope(x: number, z: number, t: number = 0): { slopeX: number; slopeZ: number } {
+  const hRight = getWaveHeight(x + SLOPE_EPSILON, z, t);
+  const hLeft  = getWaveHeight(x - SLOPE_EPSILON, z, t);
+  const hFront = getWaveHeight(x, z + SLOPE_EPSILON, t);
+  const hBack  = getWaveHeight(x, z - SLOPE_EPSILON, t);
+  return {
+    slopeX: (hRight - hLeft) / (2 * SLOPE_EPSILON),
+    slopeZ: (hFront - hBack) / (2 * SLOPE_EPSILON),
+  };
 }
 
 interface PlayerProps {
@@ -30,15 +51,16 @@ interface PlayerProps {
 
 function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
   const groupRef = useRef<THREE.Group>(null);
+  const clockRef = useRef(0);
   const [keys, setKeys] = useState<{ [key: string]: boolean }>({});
 
   // Physics state
   const stateRef = useRef({
     pitch: 0,   // Nose up/down
     roll: 0,    // Lean left/right
-    yaw: 0,     // Heading
-    cameraYaw: 0, // Camera heading
-    height: 0.4,// Start flying in the middle of the mast
+    yaw: START_YAW,     // Heading (along wave crest)
+    cameraYaw: START_YAW, // Camera heading
+    height: 0.4,// Height above wave surface
     vY: 0,      // Vertical velocity (up/down momentum)
     speed: 12,  // Start with good cruising speed
     prevPitch: 0,
@@ -49,13 +71,18 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
   useEffect(() => {
     if (gameState === 'playing') {
       stateRef.current = {
-        pitch: 0, roll: 0, yaw: 0, cameraYaw: 0,
+        pitch: 0, roll: 0, yaw: START_YAW, cameraYaw: START_YAW,
         height: 0.4, vY: 0, speed: 12,
         prevPitch: 0, prevRoll: 0,
       };
       if (groupRef.current) {
-        groupRef.current.position.set(0, 0.4, 0);
-        groupRef.current.rotation.set(0, 0, 0);
+        // Place player on the wave face wherever it currently is
+        const t = clockRef.current;
+        const currentD = WAVE_SPEED * t + START_WAVE_D;
+        const resetX = currentD * WAVE_DIR_X;
+        const resetZ = currentD * WAVE_DIR_Z;
+        groupRef.current.position.set(resetX, getWaveHeight(resetX, resetZ, t) + 0.4, resetZ);
+        groupRef.current.rotation.set(0, START_YAW, 0);
       }
     }
   }, [gameState]);
@@ -74,8 +101,9 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
   }, []);
 
   useFrame((state, delta) => {
+    clockRef.current = state.clock.elapsedTime;
     if (gameState !== 'playing' || !groupRef.current) return;
-    
+
     // Cap delta to prevent physics explosions when tab is inactive
     const dt = Math.min(delta, 0.1);
     const s = stateRef.current;
@@ -87,8 +115,8 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
     if (keys['ArrowDown'] || keys['KeyS']) targetPitch = 0.3; // Nose up
 
     let targetRoll = 0;
-    if (keys['ArrowLeft'] || keys['KeyA']) targetRoll = 0.55; // Deeper carve angle
-    if (keys['ArrowRight'] || keys['KeyD']) targetRoll = -0.55;
+    if (keys['ArrowLeft'] || keys['KeyA']) targetRoll = 0.55;  // Bottom turn (up the face toward the lip)
+    if (keys['ArrowRight'] || keys['KeyD']) targetRoll = -0.55; // Snap/cutback (down the face toward flat water)
 
     const isSnapping = keys['ShiftLeft'] || keys['ShiftRight'] || keys['Shift'];
 
@@ -104,42 +132,55 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
     s.pitch = THREE.MathUtils.lerp(s.pitch, targetPitch, dt * 5.0);
     s.roll = THREE.MathUtils.lerp(s.roll, targetRoll, dt * 6.0);
 
-    // 2. Dynamic Speed (Flow & Pumping) - REALISTIC RAIL-TO-RAIL
+    // 2. Dynamic Speed (Wave Slope + Pumping)
     const pitchRate = Math.abs(s.pitch - s.prevPitch) / dt;
-    const rollRate = Math.abs(s.roll - s.prevRoll) / dt; // How fast you are transitioning rails
-    
-    // Thrust comes from MOVEMENT (pumping pitch, or whipping rail-to-rail)
-    // Pumping (pitch) requires deliberate, full-range motion. Carving (roll) provides a moderate boost.
-    const thrust = (pitchRate * 5.5) + (rollRate * 0.5);
+    const rollRate = Math.abs(s.roll - s.prevRoll) / dt;
 
-    // Drag: Base drag + Stall drag + Carve drag (holding a turn bleeds speed)
-    // Increased carve drag to 0.2 to test bleeding more speed during long cutbacks
+    // Primary speed source: wave slope (gravity pulling you downhill)
+    const slope = getWaveSlope(groupRef.current.position.x, groupRef.current.position.z, state.clock.elapsedTime);
+    const forwardX = -Math.sin(s.yaw);
+    const forwardZ = -Math.cos(s.yaw);
+    const slopeInDirection = slope.slopeX * forwardX + slope.slopeZ * forwardZ;
+    const waveSlopeThrust = -slopeInDirection * GRAVITY * 0.35;
+
+    // Foil catch: foil extracts energy from the moving wave face.
+    // Full effect going downhill/sideways, halved going uphill.
+    const slopeMag = Math.sqrt(slope.slopeX * slope.slopeX + slope.slopeZ * slope.slopeZ);
+    const uphillRatio = slopeMag > 0.001 ? Math.max(0, slopeInDirection / slopeMag) : 0;
+    const foilCatchThrust = slopeMag * 1.5 * (1.0 - 0.5 * uphillRatio);
+
+    // Secondary speed source: pumping (pitch oscillation + rail transitions)
+    const pumpThrust = (pitchRate * 3.5) + (rollRate * 0.3);
+
+    // Drag: Base drag + Stall drag + Carve drag (unchanged)
     let drag = (s.speed * 0.08) + (Math.max(0, s.pitch) * s.speed * 1.2) + (Math.abs(s.roll) * s.speed * 0.2);
 
-    // Add massive drag penalty for snapping
     if (isSnapping && Math.abs(s.roll) > 0.1) {
       drag += s.speed * 2.5;
     }
 
-    s.speed += (thrust - drag) * dt;
+    s.speed += (waveSlopeThrust + foilCatchThrust + pumpThrust - drag) * dt;
     if (isNaN(s.speed)) s.speed = 0;
-    s.speed = THREE.MathUtils.clamp(s.speed, 1.0, 25.0); // Allow much slower minimum speed
+    s.speed = THREE.MathUtils.clamp(s.speed, 1.0, 25.0);
 
     // 3. Vertical Physics (The Balancing Act) - WITH ASSISTS
-    const gravity = 9.8;
-    const baseLift = (s.speed / 10.0) * gravity; // Reverted back to 10.0 so it doesn't auto-breach at high speeds
+    const baseLift = (s.speed / 10.0) * GRAVITY;
     const pitchLift = s.pitch * s.speed * 3.0;
-    
-    // GROUND EFFECT ASSIST: 
+
+    // GROUND EFFECT ASSIST:
     // In real life, water compresses under the board, pushing you up if you get too low.
     // If you get too high, you lose lift before breaching. This gives a "safe zone".
     let groundEffect = 0;
     if (s.height < 0.3) groundEffect = (0.3 - s.height) * 15.0; // Strong push up near water
     if (s.height > 1.0) groundEffect = -(s.height - 1.0) * 10.0; // Pull down near surface
 
-    const totalLift = baseLift + pitchLift + groundEffect;
+    // WAVE FACE LIFT: On a steep face, water rushes upward and hits the foil at an angle,
+    // generating extra lift. Steeper face = more lift = need to pitch down to stay level.
+    const waveLift = slopeMag * GRAVITY * 0.2;
 
-    s.vY += (totalLift - gravity) * dt;
+    const totalLift = baseLift + pitchLift + groundEffect + waveLift;
+
+    s.vY += (totalLift - GRAVITY) * dt;
     s.vY *= 0.85; // Heavy dampening so it doesn't bounce wildly
     s.height += s.vY * dt;
 
@@ -174,15 +215,25 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
     forward.multiplyScalar(s.speed * dt);
 
     groupRef.current.position.add(forward);
-    groupRef.current.position.y = s.height;
+    const waveY = getWaveHeight(groupRef.current.position.x, groupRef.current.position.z, state.clock.elapsedTime);
+    groupRef.current.position.y = waveY + s.height;
     groupRef.current.rotation.set(s.pitch, s.yaw, s.roll, 'YXZ');
 
-    // --- Camera Follow Logic ---
-    s.cameraYaw = THREE.MathUtils.lerp(s.cameraYaw, s.yaw, dt * 2.5);
-    const cameraOffset = new THREE.Vector3(0, 2.5, 6);
-    cameraOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), s.cameraYaw);
+    // --- Camera Follow Logic (beach/drone view) ---
+    // Camera on the shore side of the wave, looking back at player on the face
+    // Offset is fixed relative to wave direction so the face is always visible
+    const camWave = 10;  // meters toward shore (wave propagation direction)
+    const camCrest = 5;  // meters ahead along crest (player's travel direction)
+    const camUp = 3;     // meters above player
+
+    const cameraOffset = new THREE.Vector3(
+      camWave * WAVE_DIR_X + camCrest * WAVE_DIR_Z,
+      camUp,
+      camWave * WAVE_DIR_Z - camCrest * WAVE_DIR_X
+    );
+
     const targetCameraPos = groupRef.current.position.clone().add(cameraOffset);
-    state.camera.position.lerp(targetCameraPos, dt * 5);
+    state.camera.position.lerp(targetCameraPos, dt * 3);
     const lookAtTarget = groupRef.current.position.clone().add(new THREE.Vector3(0, 0.5, 0));
     state.camera.lookAt(lookAtTarget);
 
@@ -194,7 +245,7 @@ function Player({ gameState, setGameState, setCrashReason }: PlayerProps) {
   });
 
   return (
-    <group ref={groupRef} position={[0, 0.4, 0]}>
+    <group ref={groupRef} position={[START_X, getWaveHeight(START_X, START_Z) + 0.4, START_Z]}>
       <mesh position={[0, 0, 0]} castShadow>
         <boxGeometry args={[0.5, 0.05, 1.5]} />
         <meshStandardMaterial color="orange" />
@@ -230,13 +281,14 @@ function WaveMesh() {
     return geo;
   }, []);
 
-  useFrame(() => {
+  useFrame((state) => {
     if (!meshRef.current) return;
+    const t = state.clock.elapsedTime;
     const posAttr = meshRef.current.geometry.attributes.position;
     for (let i = 0; i < posAttr.count; i++) {
       const x = posAttr.getX(i);
       const z = posAttr.getZ(i);
-      posAttr.setY(i, getWaveHeight(x, z));
+      posAttr.setY(i, getWaveHeight(x, z, t));
     }
     posAttr.needsUpdate = true;
     meshRef.current.geometry.computeVertexNormals();
