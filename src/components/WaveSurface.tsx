@@ -3,23 +3,23 @@ import { shaderMaterial } from '@react-three/drei';
 import { useRef, useMemo } from 'react';
 import * as THREE from 'three';
 
-// --- 3 Gerstner Waves + Shoaling + Breaking + Full Shading ---
+// --- 3 Gerstner Waves + Weighted Shoaling + Breaking + Full Shading ---
 const WAVE_COUNT = 3;
 
 const GerstnerWaveMaterial = shaderMaterial(
   {
     uTime: 0,
-    uWaveDirX:      [0.0,  0.3, -0.2],
-    uWaveDirZ:      [1.0,  0.95, 0.98],
-    uWaveSteepness: [0.15, 0.10, 0.08],
-    uWaveLength:    [20.0, 10.0, 6.0],
-    uWaveAmplitude: [1.0,  0.3,  0.15],
-    uWaveSpeed:     [2.0,  3.0,  3.5],
-    uDepthDeep: 12.0,
-    uDepthShallow: 3.0,
-    uDepthZDeep: -40.0,
-    uDepthZShallow: 40.0,
-    uReefSlope: 0.3,
+    uWaveDirX:      [0.0,  0.15, -0.2],
+    uWaveDirZ:      [1.0,  0.99,  0.98],
+    uWaveSteepness: [0.12, 0.08,  0.06],
+    uWaveLength:    [25.0, 15.0,  8.0],
+    uWaveAmplitude: [1.2,  0.4,   0.15],
+    uWaveSpeed:     [4.0,  3.5,   5.0],
+    uDepthDeep: 10.0,
+    uDepthShallow: 1.5,
+    uShoreAngle: 0.42,
+    uShoreZCenter: 30.0,
+    uDepthGradient: 0.12,
     uSunDirection: new THREE.Vector3(0.5, 0.8, 0.3).normalize(),
     uDeepColor: new THREE.Color(0.0, 0.12, 0.30),
     uShallowColor: new THREE.Color(0.0, 0.45, 0.55),
@@ -38,9 +38,9 @@ const GerstnerWaveMaterial = shaderMaterial(
     uniform float uWaveSpeed[${WAVE_COUNT}];
     uniform float uDepthDeep;
     uniform float uDepthShallow;
-    uniform float uDepthZDeep;
-    uniform float uDepthZShallow;
-    uniform float uReefSlope;
+    uniform float uShoreAngle;
+    uniform float uShoreZCenter;
+    uniform float uDepthGradient;
 
     varying vec3 vWorldPosition;
     varying vec3 vNormal;
@@ -49,32 +49,34 @@ const GerstnerWaveMaterial = shaderMaterial(
     varying float vDepth;
 
     float getDepth(float x, float z) {
-      float effectiveZ = z - x * uReefSlope;
-      float t = clamp((effectiveZ - uDepthZDeep) / (uDepthZShallow - uDepthZDeep), 0.0, 1.0);
-      return mix(uDepthDeep, uDepthShallow, t);
+      float effectiveZ = z - x * uShoreAngle;
+      float rawDepth = uDepthDeep - (effectiveZ - uShoreZCenter) * uDepthGradient;
+      return clamp(rawDepth, uDepthShallow, uDepthDeep);
     }
 
     vec3 gerstnerWaves(vec3 pos, float time) {
       vec3 result = pos;
 
+      // Pre-compute wave 0 phase for breaking (includes time — crest moves naturally)
       float k0 = 6.28318 / uWaveLength[0];
       float f0 = k0 * (uWaveDirX[0] * pos.x + uWaveDirZ[0] * pos.z - uWaveSpeed[0] * time);
 
       for (int i = 0; i < ${WAVE_COUNT}; i++) {
         float amplitude = uWaveAmplitude[i];
         float steepness = uWaveSteepness[i];
-        float waveLen = uWaveLength[i];
 
-        if (i == 0) {
-          float depth = getDepth(pos.x, pos.z);
-          float depthRatio = depth / uDepthDeep;
-          float shoalFactor = 1.0 / sqrt(depthRatio);
-          amplitude *= shoalFactor;
-          steepness *= shoalFactor;
-          steepness = min(steepness, 0.35);
-        }
+        // Shoaling: all waves, weighted (wave 0 = full, others = 30%)
+        float depth = getDepth(pos.x, pos.z);
+        float depthRatio = max(depth / uDepthDeep, 0.05);
+        float shoalFactor = 1.0 / sqrt(depthRatio);
+        float shoalWeight = (i == 0) ? 1.0 : 0.3;
+        float effectiveShoal = 1.0 + (shoalFactor - 1.0) * shoalWeight;
+        amplitude *= effectiveShoal;
+        steepness *= effectiveShoal;
+        steepness = min(steepness, 0.4);
 
-        float k = 6.28318 / waveLen;
+        // Standard Gerstner phase — ALL waves, ALL with time
+        float k = 6.28318 / uWaveLength[i];
         float f = k * (uWaveDirX[i] * pos.x + uWaveDirZ[i] * pos.z - uWaveSpeed[i] * time);
         float a = amplitude;
         float q = clamp(steepness / (k * a * float(${WAVE_COUNT})), 0.0, 0.5);
@@ -86,7 +88,7 @@ const GerstnerWaveMaterial = shaderMaterial(
 
       // --- Breaking / Tube formation ---
       float depth = getDepth(pos.x, pos.z);
-      float breakStrength = smoothstep(6.0, 3.0, depth);
+      float breakStrength = smoothstep(5.0, 2.0, depth);
 
       if (breakStrength > 0.001) {
         float sinF0 = sin(f0);
@@ -99,13 +101,10 @@ const GerstnerWaveMaterial = shaderMaterial(
         float belowWater = min(result.y, 0.0);
 
         result.y = belowWater + aboveWater * cos(foldAngle);
-        // NEGATED: lip folds over the steep front face (-Z side of crest
-        // after Gerstner bunching), into the trough ahead of the wave
-        result.z -= aboveWater * sin(foldAngle);
+        result.z += aboveWater * sin(foldAngle);       // lip curls toward shore (+Z)
 
-        // Forward throw also negated to match fold direction
         float throwForward = breakAmount * breakAmount * aboveWater * 1.8;
-        result.z -= throwForward;
+        result.z += throwForward;                       // throw-ahead in propagation direction
       }
 
       return result;
@@ -250,9 +249,8 @@ interface WaveSurfaceProps {
   segments?: number;
 }
 
-export default function WaveSurface({ size = 200, segments = 512 }: WaveSurfaceProps) {
+export default function WaveSurface({ size = 120, segments = 256 }: WaveSurfaceProps) {
   const materialRef = useRef<any>(null);
-  const meshRef = useRef<THREE.Mesh>(null);
 
   const geometry = useMemo(() => {
     const geo = new THREE.PlaneGeometry(size, size, segments, segments);
@@ -267,7 +265,7 @@ export default function WaveSurface({ size = 200, segments = 512 }: WaveSurfaceP
   });
 
   return (
-    <mesh ref={meshRef} geometry={geometry}>
+    <mesh geometry={geometry}>
       <gerstnerWaveMaterial
         ref={materialRef}
         transparent

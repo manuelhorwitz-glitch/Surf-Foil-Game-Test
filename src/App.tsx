@@ -16,10 +16,11 @@ const WAVE_DIR_X = 0;
 const WAVE_DIR_Z = 1;
 const GRAVITY = 9.8;
 
-// --- Starting Position (pocket: just ahead of the peeling break) ---
-const START_X = 5;
-const START_Z = 20;
-const START_YAW = -Math.PI / 2;  // face +X (riding along the crest)
+// --- Player Spawn (fixed world position on the wave face) ---
+const SPAWN_X = -15;             // behind the peel (wave breaks first at -X)
+const SPAWN_Z = 15;              // in the shoaling transition zone
+const START_YAW = -Math.PI / 2;  // face +X (riding along the crest, ahead of the peel)
+const MAP_BOUNDARY = 55;         // wipeout if player rides off the mesh edge
 
 // --- Spray System ---
 const SPRAY_POOL_SIZE = 100;
@@ -71,7 +72,7 @@ function Player({ gameState, setGameState, setCrashReason, playerGroupRef, spray
       };
       if (groupRef.current) {
         const t = clockRef.current;
-        groupRef.current.position.set(START_X, getWaveHeightAt(START_X, START_Z, t) + 0.4, START_Z);
+        groupRef.current.position.set(SPAWN_X, getWaveHeightAt(SPAWN_X, SPAWN_Z, t) + 0.4, SPAWN_Z);
         groupRef.current.rotation.set(0, START_YAW, 0);
       }
     }
@@ -196,6 +197,15 @@ function Player({ gameState, setGameState, setCrashReason, playerGroupRef, spray
       return;
     }
 
+    // 4b. Boundary detection — wipeout if player rides off the mesh
+    if (Math.abs(groupRef.current.position.x) > MAP_BOUNDARY ||
+        Math.abs(groupRef.current.position.z) > MAP_BOUNDARY) {
+      sprayStateRef.current.isPlaying = false;
+      setCrashReason("RODE OFF THE WAVE! Stay on the face.");
+      setGameState('gameover');
+      return;
+    }
+
     // 5. Calculate Turning (Yaw)
     const snapMultiplier = isSnapping ? 2.5 : 1.0;
     const speedFactor = isSnapping ? 1.0 : (10.0 / Math.max(s.speed, 10.0));
@@ -248,7 +258,7 @@ function Player({ gameState, setGameState, setCrashReason, playerGroupRef, spray
   });
 
   return (
-    <group ref={groupRef} position={[START_X, getWaveHeightAt(START_X, START_Z, 0) + 0.4, START_Z]}>
+    <group ref={groupRef} position={[SPAWN_X, getWaveHeightAt(SPAWN_X, SPAWN_Z, 0) + 0.4, SPAWN_Z]}>
       <mesh position={[0, 0, 0]} castShadow>
         <boxGeometry args={[0.5, 0.05, 1.5]} />
         <meshStandardMaterial color="orange" />
@@ -521,7 +531,7 @@ function GameScene() {
         <Player gameState={gameState} setGameState={setGameState} setCrashReason={setCrashReason} playerGroupRef={playerGroupRef} sprayStateRef={sprayStateRef} />
         <SprayParticles playerGroupRef={playerGroupRef} sprayStateRef={sprayStateRef} />
 
-        <WaveSurface size={400} segments={512} />
+        <WaveSurface size={120} segments={256} />
       </Canvas>
       
       {/* HUD */}

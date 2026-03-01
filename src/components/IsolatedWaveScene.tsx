@@ -7,13 +7,15 @@ import WaveSurface from './WaveSurface';
 
 function TestSpheres() {
   const sphereRefs = useRef<THREE.Mesh[]>([]);
+  // Fixed world positions spread across the depth gradient
   const positions = useMemo(() => [
-    [0, 0, -20],   // deep water (no shoaling, no break)
-    [0, 0, 0],     // mid-depth (gentle shoaling)
-    [0, 0, 15],    // break onset zone (depth ≈ 6)
-    [0, 0, 28],    // mid-break (lip leaning forward)
-    [0, 0, 38],    // full break (barrel forming)
-  ] as [number, number, number][], []);
+    [0, -20],    // deep water (no shoaling)
+    [0, 0],      // mid-depth
+    [0, 20],     // approaching shallow zone
+    [0, 35],     // shallow / break zone
+    [20, 10],    // offset +X to show diagonal effect (deeper here)
+    [-20, 20],   // offset -X (shallower here — breaks first)
+  ] as [number, number][], []);
 
   const _up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
   const _quat = useMemo(() => new THREE.Quaternion(), []);
@@ -22,9 +24,9 @@ function TestSpheres() {
     const t = state.clock.elapsedTime;
     sphereRefs.current.forEach((sphere, i) => {
       if (!sphere) return;
-      const [x, , z] = positions[i];
+      const [x, z] = positions[i];
       const sample = getWaterSurfaceAt(x, z, t);
-      sphere.position.y = sample.height + 0.3;
+      sphere.position.set(x, sample.height + 0.3, z);
       _quat.setFromUnitVectors(_up, sample.normal);
       sphere.quaternion.copy(_quat);
     });
@@ -32,11 +34,11 @@ function TestSpheres() {
 
   return (
     <>
-      {positions.map(([x, , z], i) => (
+      {positions.map((_, i) => (
         <mesh
           key={i}
           ref={(el) => { if (el) sphereRefs.current[i] = el; }}
-          position={[x, 0, z]}
+          position={[0, 0, 0]}
         >
           <sphereGeometry args={[0.3, 16, 16]} />
           <meshStandardMaterial color="red" />
@@ -51,7 +53,7 @@ export default function IsolatedWaveScene() {
     <div className="w-full h-screen bg-sky-100 relative overflow-hidden">
       <Canvas
         shadows
-        camera={{ position: [30, 15, 30], fov: 50, near: 0.1, far: 500 }}
+        camera={{ position: [40, 20, 40], fov: 50, near: 0.1, far: 500 }}
         gl={{ antialias: true }}
       >
         <Sky sunPosition={[100, 40, 60]} />
@@ -63,11 +65,11 @@ export default function IsolatedWaveScene() {
           shadow-mapSize={[2048, 2048]}
         />
 
-        <WaveSurface />
+        <WaveSurface size={120} segments={256} />
         <TestSpheres />
 
         <OrbitControls
-          target={[0, 0, 0]}
+          target={[0, 0, 15]}
           maxPolarAngle={Math.PI / 2.1}
           minDistance={5}
           maxDistance={100}
